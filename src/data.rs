@@ -1,5 +1,31 @@
 use std::collections::HashMap;
 
+pub fn cube() -> Model {
+    Model {
+        textures: None,
+        elements: Some(vec![Element {
+            from: vec![ 0.0, 0.0, 0.0 ],
+            to: vec![ 16.0, 16.0, 16.0 ],
+            rotation: None,
+            faces: None,
+        }]),
+        display: None,
+    }
+}
+
+pub fn almost_full_cube() -> Model {
+    Model {
+        textures: None,
+        elements: Some(vec![Element {
+            from: vec![ 1.0, 0.0, 1.0 ],
+            to: vec![ 15.0, 16.0, 15.0 ],
+            rotation: None,
+            faces: None,
+        }]),
+        display: None,
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct Blockstate {
@@ -19,8 +45,8 @@ pub struct Variant {
 #[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct Model {
-    pub textures: HashMap<String, String>,
-    pub elements: Vec<Element>,
+    pub textures: Option<HashMap<String, String>>,
+    pub elements: Option<Vec<Element>>,
     pub display: Option<Display>,
 }
 
@@ -30,7 +56,7 @@ pub struct Element {
     pub from: Vec<f32>,
     pub to: Vec<f32>,
     pub rotation: Option<Rotation>,
-    pub faces: Faces,
+    pub faces: Option<Faces>,
 }
 
 #[allow(dead_code)]
@@ -62,14 +88,14 @@ pub struct Rotation {
 #[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct Display {
-    pub thirdperson_righthand: Transform,
-    pub thirdperson_lefthand: Transform,
-    pub firstperson_righthand: Transform,
-    pub firstperson_lefthand: Transform,
-    pub gui: Transform,
-    pub head: Transform,
-    pub ground: Transform,
-    pub fixed: Transform,
+    pub thirdperson_righthand: Option<Transform>,
+    pub thirdperson_lefthand: Option<Transform>,
+    pub firstperson_righthand: Option<Transform>,
+    pub firstperson_lefthand: Option<Transform>,
+    pub gui: Option<Transform>,
+    pub head: Option<Transform>,
+    pub ground: Option<Transform>,
+    pub fixed: Option<Transform>,
 }
 
 #[allow(dead_code)]

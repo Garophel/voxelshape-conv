@@ -13,13 +13,17 @@ use scan::BlockInfo;
 use std::env;
 use std::ops::{ Add, Sub };
 use std::fs::{ self, File, OpenOptions };
-use std::io::{ self, BufReader, BufWriter, Write };
+use std::io::{ self, BufWriter, Write };
 use std::str::FromStr;
-use std::path::PathBuf;
+use std::path::{ Path, PathBuf };
+use std::collections::{ HashMap, HashSet };
+
+use serde::Deserialize;
 
 static VERSION: &'static str = "0.1.1";
 
 #[derive(Clone)]
+/// AABox - Axis-Aligned Box, all faces face either +-X, +-Y or +-Z.
 pub struct AABox(f32, f32, f32, f32, f32, f32);
 
 impl AABox {
@@ -137,35 +141,41 @@ fn into_verts(el: AABox) -> Vec<Vec3> {
 }
 
 fn rotate(mut el: Vec<Vec3>, origin: Vec3, axis: Axis, angle: f32) -> Vec<Vec3> {
-    el.iter_mut()
-        .for_each(|v| *v = *v - origin);
+    for v in el.iter_mut() {
+        // Adjust v so that rotation occurs as if v was rotated around
+        // point 'origin'.
+        *v = *v - origin;
 
-    el.iter_mut()
-        .for_each(|v| {
-            let (x, y) = match axis {
-                Axis::X => (v.2, v.1),
-                Axis::Y => (v.0, v.2),
-                Axis::Z => (v.1, v.0),
-            };
+        // Map axis.
+        let (x, y) = match axis {
+            Axis::X => (v.2, v.1),
+            Axis::Y => (v.0, v.2),
+            Axis::Z => (v.1, v.0),
+        };
 
-            let pi = std::f32::consts::PI;
-            let de = (2.0 * pi) / 360.0;
-            let angle = -angle * de;
+        let pi = std::f32::consts::PI;
+        let de = (2.0 * pi) / 360.0;
 
-            // Rotate CW?
-            let (x, y) = (
-                (x * angle.cos() - y * angle.sin()),
-                (y * angle.cos() + x * angle.sin())
-            );
+        // NOTE: this line is a result of trial and error.
+        // If the format of input changes, this is likely broken.
+        let angle = -angle * de;
 
-            match axis {
-                Axis::X => *v = Vec3(v.0, y, x),
-                Axis::Y => *v = Vec3(x, v.1, y),
-                Axis::Z => *v = Vec3(y, x, v.2),
-            }
-        });
-    el.iter_mut()
-        .for_each(|v| *v = *v + origin);
+        // The actual rotation.
+        let (x, y) = (
+            (x * angle.cos() - y * angle.sin()),
+            (y * angle.cos() + x * angle.sin())
+        );
+
+        // Un-map axis.
+        match axis {
+            Axis::X => *v = Vec3(v.0, y, x),
+            Axis::Y => *v = Vec3(x, v.1, y),
+            Axis::Z => *v = Vec3(y, x, v.2),
+        }
+
+        // Revert the adjustment after the rotation.
+        *v = *v + origin
+    };
 
     el
 }
@@ -202,136 +212,20 @@ fn usage() -> ! {
 }
 
 fn main() {
+    // Get first command-line argument or the string ".".
     let first = env::args().nth(1).unwrap_or(".".to_string());
 
     if first == "-h" || first == "--help" {
+        // This call never returns (exit is called).
         usage();
     }
 
+    // The directory to scan.
     let path = PathBuf::from_str(&first).unwrap();
 
-    let paths = scan::discover_files(&path).unwrap();
-
-    // paths.iter()
-    //     .for_each(|path| println!("> {:?}", path));
-
-    let blocks = paths.iter()
-        .filter(|path| path.extension().map_or(false, |ext| ext == "java"))
-        .map(|path| scan::process_java_file(path))
-        .flatten()
-        .filter(|binfo| binfo.ids.len() > 0)
-        // .for_each(|binfo| println!(">> {}", binfo));
-        .collect::<Vec<BlockInfo>>();
-
-    let models = paths.iter()
-        .filter(|path| scan::filter_blockmodels(path))
-        // .for_each(|model| println!("model> {:?}", model));
-        .collect::<Vec<&PathBuf>>();
-
-    // println!("");
-
-    let blockstates = paths.iter()
-        .filter(|path| scan::filter_blockstates(path))
-        // .for_each(|state| println!("state> {:?}", state));
-        .collect::<Vec<&PathBuf>>();
-
-    let style = Style {
-        start_indent_level: 1,
-        tab_width: 4,
-        expand_tab: true,
-    };
-
-    for block in blocks.iter() {
-        for block_id in block.ids.iter() {
-            let blockstate: Option<Blockstate> = blockstates.iter()
-                .find(|path| path.file_stem()
-                      .map(|stem| stem == block_id.as_str()).unwrap_or(false))
-                .and_then(|path| File::open(path).ok())
-                .map(|file| BufReader::new(file))
-                .and_then(|reader| serde_json::from_reader(reader).ok());
-
-            let blockstate = match blockstate {
-                Some(blockstate) => blockstate,
-                None => {
-                    println!("ERR: unable to load blockstate for block '{}'", block_id);
-                    std::process::exit(1);
-                },
-            };
-
-            let modelgens = blockstate.variants.values().map(|variant| {
-                let model: Option<Model> = models.iter()
-                    .find(|path| path.file_stem()
-                          .map(|stem| stem == mcid_to_stem(variant.model.as_str())).unwrap_or(false))
-                    .and_then(|path| File::open(path).ok())
-                    .map(|file| BufReader::new(file))
-                    .and_then(|reader| serde_json::from_reader(reader).ok());
-                    // .map(|reader| serde_json::from_reader(reader).unwrap());
-
-                let model = match model {
-                    Some(model) => model,
-                    None => {
-                        println!("ERR: unable to load model for block '{}'", block_id);
-                        std::process::exit(1);
-                    },
-                };
-
-                let rotation = ModelRotation {
-                    x: variant.x.unwrap_or(0.0),
-                    y: variant.y.unwrap_or(0.0),
-                    z: variant.z.unwrap_or(0.0),
-                };
-
-                ModelGen {
-                    model: model,
-                    rotation: rotation,
-                }
-            }).collect::<Vec<ModelGen>>();
-
-            if !block.target_next_to {
-                // Ensure the package / directory exists.
-                let parent = match block.target.parent() {
-                    Some(parent) => parent,
-                    None => {
-                        println!("ERR: Failed to find directory for\
-                                  blockshape package.");
-                        std::process::exit(2);
-                    },
-                };
-
-                if let Err(e) = fs::create_dir(parent.join("blockshape")) {
-                    println!("ERR: Failed to create directory for\
-                              blockshape package: {:?}", e);
-                    std::process::exit(2);
-                }
-            }
-
-            let file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(&block.target);
-
-            let mut out: Box<dyn Write> = match file {
-                Ok(out_file) => Box::new(BufWriter::new(out_file)),
-                Err(e) => {
-                    println!("ERR: Failed to open file due to: {:?}", e);
-                    std::process::exit(2);
-                },
-            };
-
-            // let mut out: Box<dyn Write> = match out_file {
-            //     Some(file) => Box::new(BufWriter::new(file)),
-            //     None => Box::new(std::io::stdout()),
-            // };
-
-            match generate_file(&mut out, block, modelgens, &style) {
-                Err(e) => {
-                    println!("ERR: Failed to generate file due to: {:?}", e);
-                    std::process::exit(2);
-                },
-                Ok(()) => (),
-            }
-        }
+    match automatic(path) {
+        Err(e) => eprintln!("Err: {:?}", e),
+        _ => {},
     }
 }
 
@@ -342,21 +236,271 @@ fn mcid_to_stem<'a>(id: &'a str) -> &'a str {
     if stem_start > 0 {
         mcid_to_stem(&id[stem_start+1..]) // This may overflow if the id ends with a '/'
     } else {
+        // println!("stem: {}", &id[stem_start..]);
         &id[stem_start..]
     }
 }
 
-struct ModelGen {
-    model: Model,
-    rotation: ModelRotation,
+// Make an arbitrary string a valid Java field name.
+fn fieldify(s: &str) -> String {
+    let mut result = Vec::new();
+
+    let mut first = true;
+    for c in s.chars() {
+        if first {
+            if !c.is_ascii_alphabetic() {
+                result.push('n');
+            } else if c.is_ascii_alphabetic() {
+                result.push(c);
+            } else {
+                result.push('u');
+            }
+        } else {
+            if c.is_ascii_alphanumeric() {
+                result.push(c);
+            } else {
+                result.push('_');
+            }
+        }
+
+        first = false;
+    }
+
+    use std::iter::FromIterator;
+    String::from_iter(result)
 }
 
-fn generate_file(out: &mut Write, info: &BlockInfo, models: Vec<ModelGen>, style: &Style) -> io::Result<()> {
-    let nindent = mkindent(1, &style);
-    let iindent = mkindent(2, &style);
+fn load_files<F, T>(files: &Vec<&PathBuf>, keep: F)
+                    -> Result<HashMap<String, T>, String>
+where F: Fn(&str) -> bool, for<'de> T: Deserialize<'de> {
+    let mut map = HashMap::new();
 
+    for path in files.iter() {
+        let stem = path.file_stem()
+            .ok_or(format!("No file stem in path"))?
+            .to_str()
+            .ok_or(format!("File stem inconversible into UTF-8"))?
+            .to_owned();
+
+        if !keep(&stem) {
+            continue;
+        }
+
+        let file = File::open(path)
+            .map_err(|e| format!("{:?}", e))?;
+
+        let t = serde_json::from_reader(file)
+            .map_err(|e| format!("{:?}", e))?;
+
+        map.insert(stem, t);
+    }
+
+    Ok(map)
+}
+
+fn ends_with_variant_index(s: &str) -> bool {
+    let mut numbers = false;
+
+    let s = s.chars().collect::<Vec<char>>();
+
+    for i in 0 .. s.len() - 1 {
+        let i = s.len() - 1 - i;
+
+        if '0' <= s[i] && s[i] <= '9' {
+            numbers = true;
+        } else if numbers && s[i] == 'F' {
+            return i > 0 && s[i - 1] == '_';
+        } else {
+            return false;
+        }
+    }
+
+    false
+}
+
+fn increment_variant_index(ss: &mut String) {
+    let mut val = 0;
+    let s = ss.as_bytes();
+
+    let mut numstart = 0;
+    for i in 0 .. s.len() - 1 {
+        let j = s.len() - 1 - i;
+
+        if '0' as u8 <= s[j] && s[j] <= '9' as u8 {
+            val += (s[j] - '0' as u8) as i32 * 10_i32.pow(i as u32);
+            numstart = j;
+        } else {
+            break;
+        }
+    }
+
+    ss.replace_range(numstart.., &format!("{}", val + 1));
+}
+
+fn automatic<P: AsRef<Path>>(path: P) -> Result<(), String> {
+    let style = Style {
+        start_indent_level: 1,
+        tab_width: 4,
+        expand_tab: true,
+    };
+
+    // ALL files discovered in the scanned directory structure.
+    // (minus blacklist in scan.rs).
+    let paths = scan::discover_files(&path.as_ref()).unwrap();
+
+    let blocks = paths.iter()
+        .filter(|path| path.extension().map_or(false, |ext| ext == "java"))
+        .map(|path| scan::process_java_file(path))
+        .flatten()
+        .filter(|binfo| binfo.ids.len() > 0)
+        .collect::<Vec<BlockInfo>>();
+
+    let model_files = paths.iter()
+        .filter(|path| scan::filter_blockmodels(path))
+        .collect::<Vec<&PathBuf>>();
+
+    let blockstate_files = paths.iter()
+        .filter(|path| scan::filter_blockstates(path))
+        .collect::<Vec<&PathBuf>>();
+
+    let block_ids = {
+        let mut ids = blocks.iter()
+            .map(|block| block.ids.iter())
+            .flatten()
+            .cloned()
+            .collect::<Vec<String>>();
+
+        ids.sort();
+        ids.dedup();
+
+        ids
+    };
+
+    // Vec<blockstate, block id>
+    let blockstates: HashMap<String, Blockstate> = load_files(
+        &blockstate_files,
+        |key| block_ids.iter().any(|id| id == key))?;
+
+    let models: HashMap<String, Model> = load_files(
+        &model_files,
+        |key| blockstates.values()
+            .any(|state| state.variants.values()
+                 .any(|variant| key == mcid_to_stem(&variant.model))))?;
+
+    for binfo in blocks.iter() {
+        let mut printed_fields = HashSet::new();
+
+        let target = &binfo.target;
+        let target_package = binfo.package.clone();
+        let target_classname = binfo.classname.clone() + "BB";
+
+        // Ensure the package / directory exists.
+        if !binfo.target_next_to {
+            let parent = binfo.target.parent()
+                .ok_or(format!("Path doesn't contant a parent"))?;
+
+            fs::create_dir(parent.join("blockshape"))
+                .map_err(|e| format!("{:?}", e))?;
+        }
+
+        let out_file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(&target)
+            .map_err(|e| format!("{:?}", e))?;
+
+        let mut out: Box<dyn Write> = Box::new(BufWriter::new(out_file));
+
+        write_header(&mut out, &target_package, &target_classname)
+            .map_err(|e| format!("{:?}", e))?;
+
+        // Iterate blockstates
+        for id in binfo.ids.iter() {
+            let blockstate = blockstates.get(id)
+                .ok_or(format!("This should be unreachable: {}", &id))?;
+
+            for (key, variant) in blockstate.variants.iter() {
+                let rotation = ModelRotation {
+                    x: variant.x.unwrap_or(0.0),
+                    y: variant.y.unwrap_or(0.0),
+                    z: variant.z.unwrap_or(0.0),
+                };
+
+                let field_name = {
+                    let mut name = format!("{}", fieldify(id));
+
+                    if 0.0 != rotation.x {
+                        name += &format!("_X{}", rotation.x as i32);
+                    }
+
+                    if 0.0 != rotation.y {
+                        name += &format!("_Y{}", rotation.y as i32);
+                    }
+
+                    if 0.0 != rotation.z {
+                        name += &format!("_Z{}", rotation.z as i32);
+                    }
+
+                    while printed_fields.contains(&name) {
+                        if ends_with_variant_index(&name) {
+                            increment_variant_index(&mut name);
+                        } else {
+                            name += "_F0";
+                        }
+                    }
+
+                    printed_fields.insert(name.clone());
+
+                    name
+                };
+
+                let model = models.get(mcid_to_stem(&variant.model))
+                    .ok_or(format!("This should be unreachable: {}", &variant.model))?;
+
+                let fallback = data::almost_full_cube();
+
+                let elements = match model.elements.as_ref() {
+                    Some(els) => els,
+                    None => {
+                        eprintln!("{}", format!("No elements in model: {}", &variant.model));
+
+                        &fallback.elements.as_ref().unwrap()
+                    },
+                };
+
+                let elements = elements.iter()
+                    .map(|el| approximate(el, &rotation))
+                    .collect::<Vec<AABox>>();
+
+                let elements = merging::merge_touching(&elements);
+
+                let visibility = "public";
+
+                complex_write(
+                    &mut out,
+                    visibility,
+                    &field_name,
+                    Some(&key),
+                    &elements,
+                    &style,
+                    |aabox| format_cuboid_expr(aabox, &style)
+                ).map_err(|e| format!("{:?}", e))?;
+            }
+        }
+
+        write_footer(&mut out)
+            .map_err(|e| format!("{:?}", e))?;
+    }
+
+    Ok(())
+}
+
+fn write_header(out: &mut Write, package: &str, classname: &str)
+                   -> io::Result<()>
+{
     // "Header"
-    writeln!(out, "package {};", info.package)?;
+    writeln!(out, "package {};", package)?;
     writeln!(out, "")?;
     writeln!(out, "// File generated by VoxelShape-Conv")?;
     writeln!(out, "//         Coded by Garophel")?;
@@ -366,132 +510,65 @@ fn generate_file(out: &mut Write, info: &BlockInfo, models: Vec<ModelGen>, style
     writeln!(out, "import net.minecraft.util.math.shapes.VoxelShape;")?;
     writeln!(out, "import net.minecraft.util.math.shapes.VoxelShapes;")?;
     writeln!(out, "")?;
-    writeln!(out, "public class {}BB {{", info.classname)?; // TODO: actually use proper classname?
-
-    for variant in models {
-        let elements = variant.model.elements.iter()
-            .map(|e| approximate(e, &variant.rotation))
-            .collect::<Vec<AABox>>();
-
-        let elements = merging::merge_touching(&elements);
-
-        let count = elements.len();
-
-        let variant_name = {
-            let mut name = "BB".to_string();
-
-            if variant.rotation.x != 0.0 {
-                name += &format!("_X{}", variant.rotation.x as i32);
-            }
-
-            if variant.rotation.y != 0.0 {
-                name += &format!("_Y{}", variant.rotation.y as i32);
-            }
-
-            if variant.rotation.z != 0.0 {
-                name += &format!("_Z{}", variant.rotation.z as i32);
-            }
-
-            name
-        }; // TODO: better variant name
-
-        let visibility = if info.target_next_to {
-            "protected"
-        } else {
-            "public"
-        };
-
-        writeln!(out, "{}{} static final VoxelShape {} = Util.make(() -> {{", nindent, visibility, variant_name)?;
-
-        // println!("elements: {}", variant.model.elements.len());
-
-        if count == 1 {
-            for res in elements.iter()
-                .nth(0).iter()
-                .map(|aabox| {
-                    writeln!(
-                        out, "{}VoxelShape part = {};",
-                        iindent,
-                        format_cuboid_expr(&aabox, &style))
-                }) {
-                    res?;
-                }
-        } else {
-            for res in elements.iter()
-                .nth(0).iter()
-                .map(|aabox| {
-                    writeln!(
-                        out, "{}VoxelShape part = VoxelShapes.or({},",
-                        iindent,
-                        format_cuboid_expr(&aabox, &style))
-                }) {
-                    res?;
-                }
-
-            for res in elements.iter()
-                .skip(1) // Skip first
-                .take(count.saturating_sub(2)) // Skip last
-                .map(|aabox| {
-                    writeln!(out, "{}VoxelShapes.or({},", iindent, format_cuboid_expr(&aabox, &style))
-                }) {
-                    res?;
-                }
-
-            for res in elements.iter()
-                .last().iter()
-                .map(|aabox| {
-                    let closepars = ")".repeat(1.max(count - 1));
-
-                    writeln!(out, "{}{}{};", iindent, format_cuboid_expr(&aabox, &style), closepars)
-                }) {
-                    res?;
-                }
-        }
-
-        writeln!(out, "{}return part;", iindent)?;
-        writeln!(out, "{}}});", nindent)?;
-
-        writeln!(out, "")?;
-    }
-
-    // "Footer"
-    writeln!(out, "}}")?;
+    writeln!(out, "public class {} {{", classname)?;
 
     Ok(())
 }
 
-// let args = env::args().collect::<Vec<String>>();
+fn write_footer(out: &mut Write) -> io::Result<()> {
+    // "Footer"
+    writeln!(out, "}}")?;
+    Ok(())
+}
 
-// if args.len() < 3 {
-//     println!("ERR: Wrong number of arguments!");
-//     usage();
-// }
+fn complex_write<F1>(
+    out: &mut Write,
+    visibility: &str,
+    field_name: &str,
+    comment: Option<&str>,
+    vec: &Vec<AABox>,
+    style: &Style,
+    one: F1) -> io::Result<()>
+where F1: Fn(&AABox) -> String
+{
+    // "Normal" indent level (inside public class).
+    let nindent = mkindent(1, &style);
 
-// let state_file = &args[1];
-// let model_file = &args[2];
-// let target_file = args.get(3);
+    // "Inside" indent level (inside of {}'s).
+    let iindent = mkindent(2, &style);
 
-// let blockstate: Blockstate = {
-//     let file = File::open(state_file).expect("File not found");
-//     let reader = BufReader::new(file);
-//     serde_json::from_reader(reader).expect("Deser failed")
-// };
+    write!(
+        out,
+        "{}{} static final VoxelShape {} = Util.make(() -> {{",
+        nindent,
+        visibility,
+        field_name)?;
 
-// let model: Model = {
-//     let file = File::open(model_file).expect("File not found");
-//     let reader = BufReader::new(file);
-//     serde_json::from_reader(reader).expect("Deser failed")
-// };
+    if let Some(comment) = comment {
+        writeln!(out, " // {}", comment)?;
+    }
 
-// let out_file = target_file
-//     .map(|path| OpenOptions::new().write(true).truncate(true).create(true).open(path).unwrap());
+    let join = "VoxelShapes.or(";
 
-// let mut out: Box<dyn Write> = match out_file {
-//     Some(file) => Box::new(file),
-//     None => Box::new(std::io::stdout()),
-// };
+    if vec.len() == 1 {
+        writeln!(out, "{}VoxelShape part = {};", iindent, one(&vec[0]))?;
+    } else {
+        writeln!(out, "{}VoxelShape part = {}", iindent, join)?;
+        writeln!(out, "{}{},", iindent, one(&vec[0]))?;
 
-// match code(&mut out, blockstate, model) {
-//     Err(e) => println!("IO error: {:?}", e),
-//     Ok(()) => (),
-// }
+        for i in 1 .. vec.len() - 1 {
+            write!(out, "{}{}", iindent, join)?;
+            writeln!(out, "{},", one(&vec[i]))?;
+        }
+
+        let closepars = ")".repeat(1.max(vec.len() - 1));
+        writeln!(out, "{}{}{};", iindent, one(&vec[vec.len() - 1]), closepars)?;
+    }
+
+    writeln!(out, "{}return part;", iindent)?;
+    writeln!(out, "{}}});", nindent)?;
+
+    writeln!(out, "")?;
+
+    Ok(())
+}
